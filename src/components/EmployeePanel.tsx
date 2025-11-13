@@ -1,30 +1,81 @@
 import { useState, useEffect } from 'react';
-import { supabase, Product } from '../lib/supabase';
-import { Package, Plus, CheckCircle } from 'lucide-react';
+import { supabase, Product, Recipe, Ingredient } from '../lib/supabase';
+import { Package, Plus, CheckCircle, AlertCircle } from 'lucide-react';
+
+interface RecipeWithIngredient extends Recipe {
+  ingredients?: Ingredient;
+}
 
 export default function EmployeePanel() {
   const [products, setProducts] = useState<Product[]>([]);
+  const [ingredients, setIngredients] = useState<Ingredient[]>([]);
+  const [recipes, setRecipes] = useState<RecipeWithIngredient[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<string>('');
   const [quantity, setQuantity] = useState<string>('');
   const [employeeName, setEmployeeName] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [insufficientStock, setInsufficientStock] = useState(false);
 
   useEffect(() => {
-    loadProducts();
+    loadAllData();
   }, []);
 
-  const loadProducts = async () => {
-    const { data, error } = await supabase
-      .from('products')
-      .select('*')
-      .order('name');
+  const loadAllData = async () => {
+    try {
+      const [productsRes, ingredientsRes, recipesRes] = await Promise.all([
+        supabase.from('products').select('*').order('name'),
+        supabase.from('ingredients').select('*').order('name'),
+        supabase.from('recipes').select('*, ingredients(*)')
+      ]);
 
-    if (error) {
-      console.error('Error loading products:', error);
-    } else {
-      setProducts(data || []);
+      if (productsRes.data) setProducts(productsRes.data);
+      if (ingredientsRes.data) setIngredients(ingredientsRes.data);
+      if (recipesRes.data) setRecipes(recipesRes.data);
+    } catch (error) {
+      console.error('Error loading data:', error);
+    }
+  };
+
+  const checkIngredientsAvailability = (productId: string, qty: number): boolean => {
+    const productRecipes = recipes.filter(r => r.product_id === productId);
+
+    for (const recipe of productRecipes) {
+      const requiredQuantity = recipe.quantity * qty;
+      const ingredient = ingredients.find(i => i.id === recipe.ingredient_id);
+
+      if (!ingredient || ingredient.current_stock < requiredQuantity) {
+        return false;
+      }
+    }
+
+    return true;
+  };
+
+  const consumeIngredients = async (productId: string, qty: number): Promise<boolean> => {
+    try {
+      const productRecipes = recipes.filter(r => r.product_id === productId);
+
+      for (const recipe of productRecipes) {
+        const ingredient = ingredients.find(i => i.id === recipe.ingredient_id);
+        if (!ingredient) continue;
+
+        const consumedQuantity = recipe.quantity * qty;
+        const newStock = ingredient.current_stock - consumedQuantity;
+
+        const { error } = await supabase
+          .from('ingredients')
+          .update({ current_stock: newStock })
+          .eq('id', ingredient.id);
+
+        if (error) throw error;
+      }
+
+      return true;
+    } catch (error) {
+      console.error('Error consuming ingredients:', error);
+      return false;
     }
   };
 
@@ -36,12 +87,18 @@ export default function EmployeePanel() {
       return;
     }
 
+    const productQuantity = parseFloat(quantity);
+
+    if (!checkIngredientsAvailability(selectedProduct, productQuantity)) {
+      setInsufficientStock(true);
+      setTimeout(() => setInsufficientStock(false), 5000);
+      return;
+    }
+
     setLoading(true);
     setSuccess(false);
 
     try {
-      const productQuantity = parseFloat(quantity);
-
       const { error: logError } = await supabase
         .from('production_logs')
         .insert({
@@ -53,6 +110,9 @@ export default function EmployeePanel() {
         });
 
       if (logError) throw logError;
+
+      const ingredientsConsumed = await consumeIngredients(selectedProduct, productQuantity);
+      if (!ingredientsConsumed) throw new Error('Failed to consume ingredients');
 
       const product = products.find(p => p.id === selectedProduct);
       if (product) {
@@ -69,7 +129,7 @@ export default function EmployeePanel() {
       setQuantity('');
       setNotes('');
 
-      await loadProducts();
+      await loadAllData();
 
       setTimeout(() => setSuccess(false), 3000);
     } catch (error) {
@@ -98,7 +158,14 @@ export default function EmployeePanel() {
             {success && (
               <div className="mb-6 bg-green-50 border border-green-200 rounded-lg p-4 flex items-center gap-3">
                 <CheckCircle className="text-green-600" size={24} />
-                <p className="text-green-800 font-medium">Produção registrada com sucesso!</p>
+                <p className="text-green-800 font-medium">Produção registrada com sucesso e matérias-primas descontadas!</p>
+              </div>
+            )}
+
+            {insufficientStock && (
+              <div className="mb-6 bg-red-50 border border-red-200 rounded-lg p-4 flex items-center gap-3">
+                <AlertCircle className="text-red-600" size={24} />
+                <p className="text-red-800 font-medium">Estoque insuficiente de matérias-primas para esta produção!</p>
               </div>
             )}
 
@@ -183,46 +250,94 @@ export default function EmployeePanel() {
           </div>
         </div>
 
-        <div className="mt-8 bg-white rounded-2xl shadow-xl p-8">
-          <h2 className="text-xl font-bold text-gray-800 mb-4">Status do Estoque</h2>
-          <div className="grid gap-4">
-            {products.map((product) => {
-              const stockPercentage = (product.current_stock / product.target_stock) * 100;
-              const isLow = product.current_stock <= product.minimum_stock;
+        <div className="grid lg:grid-cols-2 gap-8">
+          <div className="bg-white rounded-2xl shadow-xl p-8">
+            <h2 className="text-xl font-bold text-gray-800 mb-4">Status dos Produtos</h2>
+            <div className="grid gap-4 max-h-96 overflow-y-auto">
+              {products.map((product) => {
+                const stockPercentage = (product.current_stock / product.target_stock) * 100;
+                const isLow = product.current_stock <= product.minimum_stock;
 
-              return (
-                <div key={product.id} className="border border-gray-200 rounded-lg p-4">
-                  <div className="flex justify-between items-start mb-2">
-                    <div>
-                      <h3 className="font-semibold text-gray-800">{product.name}</h3>
-                      <p className="text-sm text-gray-600">{product.description}</p>
+                return (
+                  <div key={product.id} className="border border-gray-200 rounded-lg p-4">
+                    <div className="flex justify-between items-start mb-2">
+                      <div>
+                        <h3 className="font-semibold text-gray-800">{product.name}</h3>
+                        <p className="text-sm text-gray-600">{product.description}</p>
+                      </div>
+                      {isLow && (
+                        <span className="bg-red-100 text-red-700 text-xs font-semibold px-3 py-1 rounded-full">
+                          Baixo
+                        </span>
+                      )}
                     </div>
-                    {isLow && (
-                      <span className="bg-red-100 text-red-700 text-xs font-semibold px-3 py-1 rounded-full">
-                        Estoque Baixo
+                    <div className="flex items-center gap-4 text-sm">
+                      <span className="text-gray-600">
+                        Atual: <span className="font-semibold text-gray-800">{product.current_stock}</span>
                       </span>
-                    )}
+                      <span className="text-gray-600">
+                        Meta: <span className="font-semibold text-gray-800">{product.target_stock}</span>
+                      </span>
+                      <span className="text-gray-600">{product.unit}</span>
+                    </div>
+                    <div className="mt-3 bg-gray-200 rounded-full h-2 overflow-hidden">
+                      <div
+                        className={`h-full transition-all ${
+                          isLow ? 'bg-red-500' : stockPercentage >= 100 ? 'bg-green-500' : 'bg-amber-500'
+                        }`}
+                        style={{ width: `${Math.min(stockPercentage, 100)}%` }}
+                      />
+                    </div>
                   </div>
-                  <div className="flex items-center gap-4 text-sm">
-                    <span className="text-gray-600">
-                      Atual: <span className="font-semibold text-gray-800">{product.current_stock}</span>
-                    </span>
-                    <span className="text-gray-600">
-                      Meta: <span className="font-semibold text-gray-800">{product.target_stock}</span>
-                    </span>
-                    <span className="text-gray-600">{product.unit}</span>
-                  </div>
-                  <div className="mt-3 bg-gray-200 rounded-full h-2 overflow-hidden">
-                    <div
-                      className={`h-full transition-all ${
-                        isLow ? 'bg-red-500' : stockPercentage >= 100 ? 'bg-green-500' : 'bg-amber-500'
-                      }`}
-                      style={{ width: `${Math.min(stockPercentage, 100)}%` }}
-                    />
-                  </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl shadow-xl p-8">
+            <h2 className="text-xl font-bold text-gray-800 mb-4">Ingredientes Necessários</h2>
+            {selectedProduct ? (
+              <div className="space-y-3 max-h-96 overflow-y-auto">
+                {recipes
+                  .filter(r => r.product_id === selectedProduct)
+                  .map((recipe) => {
+                    const ingredient = ingredients.find(i => i.id === recipe.ingredient_id);
+                    if (!ingredient) return null;
+
+                    const requiredQty = parseFloat(quantity || '0') * recipe.quantity;
+                    const hasEnough = ingredient.current_stock >= requiredQty;
+
+                    return (
+                      <div
+                        key={recipe.id}
+                        className={`border rounded-lg p-3 ${
+                          hasEnough ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50'
+                        }`}
+                      >
+                        <div className="flex justify-between items-start mb-1">
+                          <span className="font-medium text-gray-800">{ingredient.name}</span>
+                          <span className={`text-xs font-bold px-2 py-1 rounded ${
+                            hasEnough ? 'bg-green-200 text-green-700' : 'bg-red-200 text-red-700'
+                          }`}>
+                            {hasEnough ? '✓ OK' : '✗ Insuficiente'}
+                          </span>
+                        </div>
+                        <div className="text-sm text-gray-600">
+                          <span className="font-medium">Necessário:</span> {requiredQty.toFixed(2)} {ingredient.unit}
+                        </div>
+                        <div className="text-sm text-gray-600">
+                          <span className="font-medium">Disponível:</span> {ingredient.current_stock.toFixed(2)} {ingredient.unit}
+                        </div>
+                      </div>
+                    );
+                  })}
+                {recipes.filter(r => r.product_id === selectedProduct).length === 0 && (
+                  <p className="text-gray-500 text-center py-4">Nenhuma receita configurada para este produto</p>
+                )}
+              </div>
+            ) : (
+              <p className="text-gray-500 text-center py-8">Selecione um produto para ver os ingredientes necessários</p>
+            )}
           </div>
         </div>
       </div>
